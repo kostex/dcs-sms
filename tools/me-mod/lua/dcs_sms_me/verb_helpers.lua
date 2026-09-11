@@ -309,6 +309,20 @@ function H.inject_group(g, country, group_type)
         for _, wpt in ipairs(g.route.points) do wpt.boss = g end
     end
 
+    -- Vehicles carry an extra `route.spans` table — the per-leg road-network
+    -- polyline cache ED builds in create_group (me_mission.lua:5044-5048).
+    -- It is NOT optional: insert_waypoint table.inserts into it with no nil
+    -- guard (me_mission.lua:6240), so a vehicle group without one throws
+    -- "bad argument #1 to 'insert' (table expected, got nil)" on the first
+    -- `waypoint add` — after the waypoint has already
+    -- been spliced into route.points, leaving a half-built route. Mission
+    -- load doesn't repair it either: fixSpans only regenerates when spans is
+    -- already non-nil. Create it here so injected groups match GUI-created
+    -- ones. (Discord bug report 2026-09-07.)
+    if group_type == 'vehicle' and g.route and g.route.spans == nil then
+        g.route.spans = {}
+    end
+
     -- Canonical insertion order — do not deviate.
     local ok_cgo, cgo_err = pcall(Mission.create_group_objects, g)
     if not ok_cgo then return nil, 'create_group_objects: ' .. tostring(cgo_err) end

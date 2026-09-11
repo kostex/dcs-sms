@@ -144,23 +144,47 @@ local WAYPOINT_MODES = {
     ['on railroads']             = { key = 'onRailroads',      type = 'On Railroads',      action = 'On Railroads' },
 }
 
--- ACTION_AIRFIELD_TYPE — the subset of WAYPOINT_ACTIONS that imply an
--- airfield-linked TYPE. Picking one of these actions in ED's route panel
--- flips the paired waypoint type (e.g. "From Parking Area" → TakeOffParking).
--- set-action consults this so the type tracks the action the way the GUI
--- does; actions absent here are non-airfield (Turning Point, Fly Over Point,
--- ground/ship traversal, formations) and leave the type alone. The
--- (action → type, panel-actions key) pairing mirrors WAYPOINT_MODES above.
+-- ACTION_CANONICAL_TYPE — the TYPE each action pairs with. This is the full
+-- inverse of DCS's Scripts/utils_common.lua actions table: every action
+-- there belongs to exactly one type, so every entry of WAYPOINT_ACTIONS
+-- appears here. set-action consults it so the type tracks the action the way
+-- ED's combo box does.
+--
+-- Completeness is load-bearing, not tidiness. A (type, action) pair that
+-- isn't in ED's index gets silently substituted by waypointActionToType
+-- (me_route.lua:2415-2425) — for a ground group, anything that isn't
+-- 'On Road' becomes Off Road. When this table only listed the airfield
+-- actions, set-action kept the waypoint's existing type for everything
+-- else, so `set-action "On Railroads"` produced the illegal pair
+-- 'Turning Point:On Railroads' and the waypoint quietly became Off Road.
+-- Naming the type for every action means the pair is always legal.
+--
 -- gh #68 item 4: set-action "From Parking Area" used to leave the type at
 -- "Turning Point", producing an invalid parking-start waypoint.
-local ACTION_AIRFIELD_TYPE = {
-    ['From Runway']           = { type = 'TakeOff',           key = 'takeoffRunway' },
-    ['From Parking Area']     = { type = 'TakeOffParking',    key = 'takeoffParking' },
-    ['From Parking Area Hot'] = { type = 'TakeOffParkingHot', key = 'takeoffParkingHot' },
-    ['From Ground Area']      = { type = 'TakeOffGround',     key = 'takeoffGround' },
-    ['From Ground Area Hot']  = { type = 'TakeOffGroundHot',  key = 'takeoffGroundHot' },
-    ['Landing']               = { type = 'Land',              key = 'landing' },
-    ['LandingReFuAr']         = { type = 'LandingReFuAr',     key = 'LandingReFuAr' },
+local ACTION_CANONICAL_TYPE = {
+    -- Airfield-linked: these flip the type to a takeoff/landing mode.
+    ['From Runway']           = 'TakeOff',
+    ['From Parking Area']     = 'TakeOffParking',
+    ['From Parking Area Hot'] = 'TakeOffParkingHot',
+    ['From Ground Area']      = 'TakeOffGround',
+    ['From Ground Area Hot']  = 'TakeOffGroundHot',
+    ['Landing']               = 'Land',
+    ['LandingReFuAr']         = 'LandingReFuAr',
+    -- Trains get their own type.
+    ['On Railroads']          = 'On Railroads',
+    -- Everything else — both air point modes and every ground/ship
+    -- traversal and formation mode — shares 'Turning Point'.
+    ['Turning Point']         = 'Turning Point',
+    ['Fly Over Point']        = 'Turning Point',
+    ['Off Road']              = 'Turning Point',
+    ['On Road']               = 'Turning Point',
+    ['Rank']                  = 'Turning Point',
+    ['Cone']                  = 'Turning Point',
+    ['Vee']                   = 'Turning Point',
+    ['Diamond']               = 'Turning Point',
+    ['EchelonL']              = 'Turning Point',
+    ['EchelonR']              = 'Turning Point',
+    ['Custom']                = 'Turning Point',
 }
 
 -- resolve_action_entry — look up panel_route.actions[key] (the runtime
@@ -176,6 +200,106 @@ local function resolve_action_entry(key)
         end
     end)
     return entry
+end
+
+-- TYPE_CANONICAL_ACTION — for the waypoint types that admit exactly one
+-- action, the action ED pairs them with. 'Turning Point' is deliberately
+-- absent: every ground formation and both air point modes share that type,
+-- so set-type must keep whatever action the waypoint already carries.
+-- Derived from the same DCS Scripts/utils_common.lua actions table as
+-- WAYPOINT_MODES; it is that table keyed by type instead of by UI label.
+local TYPE_CANONICAL_ACTION = {
+    ['TakeOff']           = 'From Runway',
+    ['TakeOffParking']    = 'From Parking Area',
+    ['TakeOffParkingHot'] = 'From Parking Area Hot',
+    ['TakeOffGround']     = 'From Ground Area',
+    ['TakeOffGroundHot']  = 'From Ground Area Hot',
+    ['Land']              = 'Landing',
+    ['LandingReFuAr']     = 'LandingReFuAr',
+    ['On Railroads']      = 'On Railroads',
+}
+
+-- wp_type_action — read a waypoint's mode as the flat (type, action) string
+-- pair the CLI speaks, whichever in-memory shape it currently has.
+--
+-- ED keeps the pair in ONE field: wpt.type is a table reference into
+-- panel_route.actions ({type=, name=, action=}) and wpt.action is dropped
+-- entirely — fixWaypointForGroup does that conversion on every mission load
+-- (me_mission.lua:1029-1030). A waypoint we just wrote may still be in the
+-- flat .miz shape, so handle both.
+local function wp_type_action(wp)
+    if type(wp) ~= 'table' then return nil, nil end
+    if type(wp.type) == 'table' then
+        return wp.type.type, wp.type.action
+    end
+    return wp.type, wp.action
+end
+
+-- flatten_wp — a strip_back_refs copy of a waypoint with its mode rendered
+-- as the flat `type` / `action` string pair the CLI documents, instead of
+-- ED's internal panel_route.actions table. Without this, `route get` on a
+-- mission the ME has loaded reports
+--   "type": {"type": "Turning Point", "name": "Off road", "action": "Off Road"}
+-- with no top-level "action" at all, while a waypoint written moments
+-- earlier by our own verbs reports a bare string — the shape inconsistency
+-- called out in the 2026-09-07 bug report.
+local function flatten_wp(wp)
+    local out = strip_back_refs(wp)
+    if type(out) ~= 'table' then return out end
+    local t, a = wp_type_action(wp)
+    out.type = t
+    out.action = a
+    return out
+end
+
+-- normalize_wp_type — build the value ED expects in wpt.type from a flat
+-- (type, action) pair.
+--
+-- This is not cosmetic. ED's save path serializes a waypoint as
+--   type = s.type.type, action = s.type.action
+-- (me_mission.lua:4045-4046 for air groups, 4240-4241 for ground). Indexing
+-- a *string* with .type yields nil in Lua 5.1 rather than raising, so a bare
+-- string in wpt.type is written to the .miz as type=nil/action=nil — and the
+-- post-save reload then dies in waypointActionToType on `type .. ':' ..
+-- action` (me_route.lua:2414), taking the mission with it. Equally, leaving a
+-- stale wpt.type while only updating wpt.action silently discards the change,
+-- because the save reads the action out of wpt.type, never wpt.action.
+--
+-- waypointActionToType is ED's own converter — the one fixWaypointForGroup
+-- uses — so routing the pair through it stores exactly what the GUI would
+-- have, including ED's fallback when the pair isn't a legal combination.
+-- Falls back to the plain type string when panel_route isn't loaded (unit
+-- tests / standalone contexts). Discord bug report 2026-09-07.
+local function normalize_wp_type(type_str, action_str, group_type)
+    if type(type_str) ~= 'string' or type(action_str) ~= 'string' then
+        return type_str
+    end
+    local entry
+    pcall(function()
+        local panel_route = require('me_route')
+        if type(panel_route.waypointActionToType) == 'function' then
+            entry = panel_route.waypointActionToType(type_str, action_str, group_type)
+        end
+    end)
+    return entry or type_str
+end
+
+-- apply_wp_mode — write a (type, action) pair onto a waypoint in both the
+-- shape ED saves from and the flat one older readers expect.
+--
+-- The two must not contradict each other. waypointActionToType substitutes a
+-- default when the requested pair isn't a legal combination (me_route.lua:
+-- 2415-2425) — asking for type 'Turning Point' while the waypoint still
+-- carries action 'Landing' yields actions.turningPoint, action and all — so
+-- the action that actually lands in the .miz is read back off the resolved
+-- entry rather than assumed.
+local function apply_wp_mode(wp, type_str, action_str, group_type)
+    wp.type = normalize_wp_type(type_str, action_str, group_type)
+    if type(wp.type) == 'table' then
+        wp.action = wp.type.action
+    else
+        wp.action = action_str
+    end
 end
 
 -- refresh_route_panel — re-render the right-side Route panel (waypoint
@@ -228,6 +352,82 @@ local function ensure_map_objects(g)
             Mission.create_group_map_objects(g, true)
         end
     end)
+end
+
+-- rebuild_route_spans — regenerate route.spans from route.points.
+--
+-- Mirrors what ED does at mission load: fixSpans (me_mission.lua:746-752)
+-- hands the route to generateSpans (768-799), which walks the road network
+-- for legs whose endpoints are both On Road / On Railroads and lays a
+-- straight segment otherwise, then appends a degenerate entry for the last
+-- waypoint — one entry per point.
+--
+-- The straight-segment fallback matters: generateSpans leaves spans[i] nil
+-- when FindOptimalPath can't route a leg, and it isn't reachable at all in
+-- standalone contexts. insert_waypoint indexes spans by waypoint position,
+-- so a short array would quietly become a sparse one on the next add.
+local function rebuild_route_spans(route)
+    route.spans = {}
+    pcall(function()
+        local Mission = require('me_mission')
+        if type(Mission.generateSpans) == 'function' then
+            Mission.generateSpans(route)
+        end
+    end)
+    if type(route.spans) ~= 'table' then route.spans = {} end
+    local points = route.points
+    if type(points) ~= 'table' or #points < 2 then return end
+    for i = 1, #points - 1 do
+        if route.spans[i] == nil then
+            route.spans[i] = { { x = points[i].x,     y = points[i].y },
+                               { x = points[i + 1].x, y = points[i + 1].y } }
+        end
+    end
+    if route.spans[#points] == nil then
+        local last = points[#points]
+        route.spans[#points] = { { x = last.x, y = last.y },
+                                 { x = last.x, y = last.y } }
+    end
+end
+
+-- ensure_route_spans — guarantee route.spans exists on a vehicle group.
+-- The same class of ME assumption ensure_map_objects covers: insert_waypoint
+-- table.inserts into g.route.spans unconditionally (me_mission.lua:6240),
+-- and ED's fixSpans only *re*generates a spans table that is already
+-- non-nil — it never creates a missing one. GUI-created and .miz-loaded
+-- vehicle groups always have one; groups injected before the verb_helpers
+-- fix, and prefabs distilled from such a group, may not.
+local function ensure_route_spans(g, category)
+    if category ~= 'vehicle' then return end
+    if type(g.route) ~= 'table' or type(g.route.spans) == 'table' then return end
+    rebuild_route_spans(g.route)
+end
+
+-- remove_waypoint_native — ED's remove_waypoint with route.spans detached,
+-- then regenerated.
+--
+-- ED's own spans bookkeeping inside remove_waypoint (me_mission.lua:6649-
+-- 6669) is out of range at both ends: removing Lua index 1 reads
+-- spans[index-1], i.e. spans[0]; emptying the table reads
+-- points[#spans], i.e. points[0]. Either raises — and it raises AFTER
+-- remove_waypoint_symbol / remove_waypoint_text have already spliced
+-- mapObjects.route.{points,numbers} (6644-6647) but BEFORE route.points is
+-- spliced (6671), leaving the group with fewer symbols than waypoints and an
+-- orphaned icon painted on the map. Every later index then misaligns.
+--
+-- Detaching for the duration is safe because every other spans consumer is
+-- nil-guarded — build_route_line (me_mission.lua:7470 and 7502) and
+-- MapWindow.move_waypoint (me_map_window.lua:3551) — and regenerating
+-- afterwards leaves exactly what ED's fixSpans would build at load.
+--
+-- Returns ok, err like pcall.
+local function remove_waypoint_native(g, lua_index)
+    local Mission = require('me_mission')
+    local had_spans = type(g.route) == 'table' and g.route.spans ~= nil
+    if had_spans then g.route.spans = nil end
+    local ok, err = pcall(Mission.remove_waypoint, g, lua_index)
+    if had_spans then rebuild_route_spans(g.route) end
+    return ok, err
 end
 
 -- find_route — locate a group by name or id, return its route table.
@@ -315,8 +515,9 @@ function M.route_list(args)
     if not route then return { ok = false, error = err } end
     local points = {}
     for i, wp in ipairs(route.points) do
+        local wp_type, wp_action = wp_type_action(wp)
         points[i] = {
-            index = i - 1, type = wp.type, action = wp.action,
+            index = i - 1, type = wp_type, action = wp_action,
             north = wp.x, east = wp.y, alt = wp.alt, alt_type = wp.alt_type,
             speed = wp.speed, name = wp.name or '', eta = wp.ETA or 0,
             has_task = (wp.task and wp.task.params and wp.task.params.tasks
@@ -344,7 +545,7 @@ function M.waypoint_get(args)
                                            has_id and args.id or nil, args.index)
     if not wp then return { ok = false, error = err } end
     return { ok = true, group = g.name, index = args.index,
-             waypoint = strip_back_refs(wp) }
+             waypoint = flatten_wp(wp) }
 end
 
 function M.waypoint_add(args)
@@ -381,20 +582,26 @@ function M.waypoint_add(args)
     if args.eta ~= nil and (type(args.eta) ~= 'number' or args.eta < 0) then
         return { ok = false, error = 'eta must be >= 0' }
     end
-    -- Inheritance source = last WP (nil if route is empty).
+    -- Inheritance source = last WP (nil if route is empty). Its mode has to
+    -- be read through wp_type_action: on a WP the ME has normalized,
+    -- source.type is a table, and feeding that straight back into
+    -- insert_waypoint's `type` argument would nest one inside the next.
     local source = route.points[#route.points]
+    local src_type, src_action = wp_type_action(source)
     local cat_defaults = CATEGORY_DEFAULTS[cat] or CATEGORY_DEFAULTS.vehicle
     -- Compute the parameters Mission.insert_waypoint takes. It inherits
     -- alt_type internally but takes everything else from us.
     local alt = args.alt or (source and source.alt) or cat_defaults.alt
     local speed = args.speed or (source and source.speed) or cat_defaults.speed
-    local type_str = args.type or (source and source.type) or cat_defaults.type
+    local type_str = args.type or src_type or cat_defaults.type
+    local action_str = args.action or src_action or cat_defaults.action
     local name_text = args.name_text or ''
     local formation_template = args.formation_template
             or (source and source.formation_template) or ''
     -- Delegate to ME-native insert_waypoint so we get the waypoint icon,
     -- numbered label, target array slots, and label renumbering for free.
     ensure_map_objects(g)
+    ensure_route_spans(g, cat)
     local Mission = require('me_mission')
     local insert_idx = #route.points + 1
     local ok, wpt_or_err = pcall(Mission.insert_waypoint, g, insert_idx,
@@ -404,7 +611,9 @@ function M.waypoint_add(args)
     end
     local new_wp = wpt_or_err
     -- Post-process: fields insert_waypoint doesn't set + caller overrides.
-    new_wp.action = args.action or (source and source.action) or cat_defaults.action
+    -- insert_waypoint stored our raw `type` string; re-derive the
+    -- (type, action) pair into the table shape ED saves from.
+    apply_wp_mode(new_wp, type_str, action_str, cat)
     if args.alt_type ~= nil then new_wp.alt_type = args.alt_type end
     if args.eta ~= nil then new_wp.ETA = args.eta
     elseif new_wp.ETA == nil then new_wp.ETA = 0 end
@@ -414,7 +623,7 @@ function M.waypoint_add(args)
     refresh_route_panel()
     refresh_group_view(g)
     return { ok = true, group = g.name, index = new_wp.index - 1,
-             waypoint = strip_back_refs(new_wp) }
+             waypoint = flatten_wp(new_wp) }
 end
 
 function M.waypoint_insert(args)
@@ -464,16 +673,19 @@ function M.waypoint_insert(args)
     -- before=0 the source is the WP currently at index 0 (Lua index 1).
     local source_lua_idx = math.max(args.before, 1)
     local source = route.points[source_lua_idx]
+    local src_type, src_action = wp_type_action(source)
     local cat_defaults = CATEGORY_DEFAULTS[cat] or CATEGORY_DEFAULTS.vehicle
     local alt = args.alt or (source and source.alt) or cat_defaults.alt
     local speed = args.speed or (source and source.speed) or cat_defaults.speed
-    local type_str = args.type or (source and source.type) or cat_defaults.type
+    local type_str = args.type or src_type or cat_defaults.type
+    local action_str = args.action or src_action or cat_defaults.action
     local name_text = args.name_text or ''
     local formation_template = args.formation_template
             or (source and source.formation_template) or ''
     -- Delegate to ME-native insert_waypoint. Lua index for "before wire N"
     -- is N+1 (so before=0 → insert at Lua 1).
     ensure_map_objects(g)
+    ensure_route_spans(g, cat)
     local Mission = require('me_mission')
     local insert_idx = args.before + 1
     local ok, wpt_or_err = pcall(Mission.insert_waypoint, g, insert_idx,
@@ -482,7 +694,7 @@ function M.waypoint_insert(args)
         return { ok = false, error = 'insert_waypoint failed: ' .. tostring(wpt_or_err) }
     end
     local new_wp = wpt_or_err
-    new_wp.action = args.action or (source and source.action) or cat_defaults.action
+    apply_wp_mode(new_wp, type_str, action_str, cat)
     if args.alt_type ~= nil then new_wp.alt_type = args.alt_type end
     if args.eta ~= nil then new_wp.ETA = args.eta
     elseif new_wp.ETA == nil then new_wp.ETA = 0 end
@@ -492,7 +704,7 @@ function M.waypoint_insert(args)
     refresh_route_panel()
     refresh_group_view(g)
     return { ok = true, group = g.name, index = args.before,
-             waypoint = strip_back_refs(new_wp) }
+             waypoint = flatten_wp(new_wp) }
 end
 
 function M.waypoint_remove(args)
@@ -519,8 +731,7 @@ function M.waypoint_remove(args)
     -- target arrays, task back-references on other groups, and route line
     -- all get cleaned up in lockstep with route.points.
     ensure_map_objects(g)
-    local Mission = require('me_mission')
-    local ok, err_rm = pcall(Mission.remove_waypoint, g, args.index + 1)
+    local ok, err_rm = remove_waypoint_native(g, args.index + 1)
     if not ok then
         return { ok = false, error = 'remove_waypoint failed: ' .. tostring(err_rm) }
     end
@@ -621,11 +832,10 @@ function M.waypoint_set_mode(args)
     if not mode then
         return { ok = false, error = "unknown waypoint mode '" .. tostring(args.mode) .. "'" }
     end
-    local wp, _, g, _, err = find_waypoint(has_name and args.name or nil, has_id and args.id or nil, args.index)
+    local wp, _, g, cat, err = find_waypoint(has_name and args.name or nil, has_id and args.id or nil, args.index)
     if not wp then return { ok = false, error = err } end
     -- Airfield-linkage transition (same logic as set-type).
-    local old_type = type(wp.type) == 'string' and wp.type
-            or (type(wp.type) == 'table' and wp.type.type) or ''
+    local old_type = wp_type_action(wp) or ''
     local old_was_airfield = AIRFIELD_TYPES[old_type] == true
     local new_is_airfield = AIRFIELD_TYPES[mode.type] == true
     -- Use the panel_route.actions table reference if available, falling
@@ -633,9 +843,18 @@ function M.waypoint_set_mode(args)
     -- prevents panel_route.update() from silently re-normalizing
     -- wpt.type back to actions.turningPoint when it fails to match a
     -- string against the combo items' .name fields.
+    -- resolve_action_entry looks the pair up by its actions-table KEY, which
+    -- is exact; apply_wp_mode is the (type, action) route and agrees with it
+    -- for every legal WAYPOINT_MODES pair. Prefer the key, but fall through
+    -- to apply_wp_mode rather than to a bare string so the standalone path
+    -- still writes something the save can read.
     local action_entry = resolve_action_entry(mode.key)
-    wp.type = action_entry or mode.type
-    wp.action = mode.action
+    if action_entry then
+        wp.type = action_entry
+        wp.action = action_entry.action
+    else
+        apply_wp_mode(wp, mode.type, mode.action, cat)
+    end
     if old_was_airfield and not new_is_airfield then
         wp.airdromeId      = nil
         wp.helipadId       = nil
@@ -662,7 +881,9 @@ function M.waypoint_set_mode(args)
     end
     refresh_route_panel()
     refresh_group_view(g)
-    return { ok = true, group = g.name, index = args.index, type = wp.type, action = wp.action }
+    local out_type, out_action = wp_type_action(wp)
+    return { ok = true, group = g.name, index = args.index,
+             type = out_type, action = out_action }
 end
 
 -- waypoint_link_airbase — link a waypoint to a specific airbase by name.
@@ -702,9 +923,8 @@ function M.waypoint_link_airbase(args)
     end
 
     -- Determine waypoint type. wpt.type can be either a string (our wire
-    -- shape) or a panel-normalized table — handle both.
-    local wp_type_str = type(wp.type) == 'string' and wp.type
-            or (type(wp.type) == 'table' and wp.type.type) or ''
+    -- shape) or a panel-normalized table — wp_type_action handles both.
+    local wp_type_str = wp_type_action(wp) or ''
 
     -- Parking preservation (gh #68 item 5). If this is a parking-start
     -- waypoint already linked to THIS airbase and the lead unit has an
@@ -797,18 +1017,26 @@ function M.waypoint_set_type(args)
     if type(args.wp_type) ~= 'string' or not WAYPOINT_TYPES[args.wp_type] then
         return { ok = false, error = "unknown waypoint type '" .. tostring(args.wp_type) .. "'" }
     end
-    local wp, _, g, _, err = find_waypoint(has_name and args.name or nil, has_id and args.id or nil, args.index)
+    local wp, _, g, cat, err = find_waypoint(has_name and args.name or nil, has_id and args.id or nil, args.index)
     if not wp then return { ok = false, error = err } end
     -- Detect a transition AWAY from an airfield-linked type. The ME UI
     -- clears airdromeId / helipadId / grassAirfieldId and unlinks any
     -- bound unit in this case (me_route.lua setWPTppmDefault, ~line 721).
     -- Skipping that cleanup leaves stale linkage in the .miz that
     -- conflicts with the new type at mission load.
-    local old_type = type(wp.type) == 'string' and wp.type
-            or (type(wp.type) == 'table' and wp.type.type) or ''
+    local old_type, old_action = wp_type_action(wp)
+    old_type = old_type or ''
     local old_was_airfield = AIRFIELD_TYPES[old_type] == true
     local new_is_airfield = AIRFIELD_TYPES[args.wp_type] == true
-    wp.type = args.wp_type
+    -- Types that admit exactly one action drag it along, the way picking
+    -- them in ED's type combo does; 'Turning Point' and friends keep the
+    -- waypoint's existing action. The pair then has to be re-derived into
+    -- wpt.type — see normalize_wp_type for why a bare string corrupts the
+    -- save.
+    local cat_defaults = CATEGORY_DEFAULTS[cat] or CATEGORY_DEFAULTS.vehicle
+    local new_action = TYPE_CANONICAL_ACTION[args.wp_type]
+            or old_action or cat_defaults.action
+    apply_wp_mode(wp, args.wp_type, new_action, cat)
     if old_was_airfield and not new_is_airfield then
         wp.airdromeId      = nil
         wp.helipadId       = nil
@@ -832,7 +1060,9 @@ function M.waypoint_set_type(args)
     end
     refresh_route_panel()
     refresh_group_view(g)
-    return { ok = true, group = g.name, index = args.index, type = wp.type }
+    local out_type, out_action = wp_type_action(wp)
+    return { ok = true, group = g.name, index = args.index,
+             type = out_type, action = out_action }
 end
 
 function M.waypoint_set_action(args)
@@ -844,32 +1074,27 @@ function M.waypoint_set_action(args)
     if type(args.action) ~= 'string' or not WAYPOINT_ACTIONS[args.action] then
         return { ok = false, error = "unknown waypoint action '" .. tostring(args.action) .. "'" }
     end
-    local wp, _, g, _, err = find_waypoint(has_name and args.name or nil, has_id and args.id or nil, args.index)
+    local wp, _, g, cat, err = find_waypoint(has_name and args.name or nil, has_id and args.id or nil, args.index)
     if not wp then return { ok = false, error = err } end
-    wp.action = args.action
 
     -- Pair the waypoint TYPE with the action, the way ED's action combo does.
     -- An airfield/takeoff/landing action implies a specific airfield-linked
     -- type; choosing a non-airfield action while the type is currently an
     -- airfield type reverts it to "Turning Point" (and clears the linkage).
-    -- All other cases (a non-airfield action on a non-airfield type, e.g.
-    -- formations / ground traversal) leave wp.type untouched — those types
-    -- are managed by set-mode / set-formation. gh #68 item 4.
-    local old_type = type(wp.type) == 'string' and wp.type
-            or (type(wp.type) == 'table' and wp.type.type) or ''
+    -- gh #68 item 4.
+    local old_type = wp_type_action(wp) or ''
     local old_was_airfield = AIRFIELD_TYPES[old_type] == true
-    local pair = ACTION_AIRFIELD_TYPE[args.action]
-    local new_type_str = old_type
-    local type_managed = false
-    if pair then
-        type_managed = true
-        new_type_str = pair.type
-        wp.type = resolve_action_entry(pair.key) or pair.type
-    elseif old_was_airfield then
-        type_managed = true
-        new_type_str = 'Turning Point'
-        wp.type = resolve_action_entry('turningPoint') or 'Turning Point'
-    end
+    local paired_type = ACTION_CANONICAL_TYPE[args.action]
+    local new_type_str = paired_type or old_type
+    local type_managed = paired_type ~= nil
+    -- Re-derive wpt.type from the (type, action) pair in EVERY branch, not
+    -- just the airfield ones. The ground formations and traversal modes all
+    -- share type 'Turning Point' and differ only in the action — and ED's
+    -- save reads the action out of wpt.type, never wpt.action
+    -- (me_mission.lua:4241). Leaving a stale wpt.type here meant
+    -- `set-action Rank` on an Off Road waypoint wrote 'Off Road' back to the
+    -- .miz and the formation change vanished on save.
+    apply_wp_mode(wp, new_type_str, args.action, cat)
 
     if type_managed then
         local new_is_airfield = AIRFIELD_TYPES[new_type_str] == true
@@ -901,8 +1126,9 @@ function M.waypoint_set_action(args)
 
     refresh_route_panel()
     refresh_group_view(g)
+    local out_type, out_action = wp_type_action(wp)
     return { ok = true, group = g.name, index = args.index,
-             action = wp.action, type = new_type_str }
+             action = out_action, type = out_type }
 end
 
 function M.waypoint_set_name(args)
@@ -1010,7 +1236,26 @@ function M.route_get(args)
     local route, g, _, err = find_route(has_name and args.name or nil,
                                         has_id and args.id or nil)
     if not route then return { ok = false, error = err } end
-    return { ok = true, group = g.name, route = strip_back_refs(route) }
+    local out = strip_back_refs(route)
+    -- Drop the spans render cache. It's the per-leg road-network polyline ED
+    -- rebuilds from route.points at load, not route data — and an On Road leg
+    -- can carry well over a thousand nodes, which both bloats the response
+    -- and eats the strip_back_refs node budget that protects the fields the
+    -- caller actually asked for. Previously it was absent for SMS-created
+    -- groups and present for .miz-loaded ones; now it's consistently absent.
+    if type(out) == 'table' then out.spans = nil end
+    -- Re-flatten each point's mode; strip_back_refs copies ED's nested
+    -- type table verbatim (see flatten_wp).
+    if type(out) == 'table' and type(out.points) == 'table' then
+        for i, wp in ipairs(route.points) do
+            if type(out.points[i]) == 'table' then
+                local t, a = wp_type_action(wp)
+                out.points[i].type = t
+                out.points[i].action = a
+            end
+        end
+    end
+    return { ok = true, group = g.name, route = out }
 end
 
 function M.route_clear(args)
@@ -1034,13 +1279,26 @@ function M.route_clear(args)
     -- Remove from last to first so indices stay stable during the loop.
     -- Delegate to ME-native remove_waypoint for symbol/label/task cleanup.
     ensure_map_objects(g)
-    local Mission = require('me_mission')
+    local last_err
     for i = previous, 1, -1 do
-        pcall(Mission.remove_waypoint, g, i)
+        local ok, err_rm = remove_waypoint_native(g, i)
+        if not ok then last_err = err_rm end
     end
     refresh_route_panel()
     refresh_group_view(g)
-    return { ok = true, group = g.name, points_removed = previous }
+    -- Report what actually happened. This used to return
+    -- points_removed = previous unconditionally while swallowing every
+    -- per-waypoint failure, so a partial clear looked like a full one.
+    local remaining = #route.points
+    if remaining > 0 then
+        return { ok = false, group = g.name,
+                 points_removed = previous - remaining, remaining = remaining,
+                 error = 'route clear incomplete: ' .. remaining .. ' of '
+                         .. previous .. ' waypoint(s) could not be removed'
+                         .. (last_err and (' — ' .. tostring(last_err)) or '') }
+    end
+    return { ok = true, group = g.name,
+             points_removed = previous, remaining = 0 }
 end
 
 -- ============================================================

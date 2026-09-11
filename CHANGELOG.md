@@ -116,6 +116,55 @@ This is the first tag after a long quiet period — `sms.version` had been froze
 
 ## ME-mod
 
+### [Unreleased]
+
+**Fixed**
+- **`waypoint add` / `insert` no longer fail on ground groups the CLI created.**
+  The ME gives every `vehicle` group a `route.spans` table — the per-leg
+  road-network cache — in its own `create_group`, and `insert_waypoint` writes
+  into it without checking that it exists. `group create-vehicle` built its
+  group table by hand and never made one, so every `waypoint add` past the
+  first failed with `bad argument #1 to 'insert' (table expected, got nil)`.
+  Worse, the throw landed *after* the waypoint was already spliced into
+  `route.points`, so the route kept a half-built waypoint with no action, ETA
+  or task. Mission load didn't repair it either — the ME's `fixSpans` only
+  regenerates a spans table that already exists. Group injection now creates
+  it, and the route verbs carry a guard for groups that arrive by another path
+  (a prefab distilled from an affected group, say).
+- **Saving a mission after editing a route no longer corrupts it.** A
+  waypoint's `type` and `action` look like two independent strings in the
+  `.miz`, but in memory the ME keeps the *pair* in `wpt.type` and drops
+  `wpt.action` entirely; its save reads both halves back out of `wpt.type` and
+  never looks at `wpt.action`. The route verbs were writing a plain string
+  there, which Lua silently resolves to nothing on the way out — so the
+  waypoint was written to disk with no type and no action, and reopening the
+  mission crashed the editor. Every verb that sets a type or an action now
+  rebuilds the pair through the ME's own converter.
+- **`waypoint set-action` now actually changes ground formations.** Off Road,
+  On Road, Rank, Cone, Vee, Diamond, Echelon and Custom differ only in the
+  action — the type stays `Turning Point` — and because the save reads the
+  action out of `wpt.type`, setting one had no effect on the saved mission.
+  `On Railroads` was doubly affected: it was silently rewritten to Off Road.
+- **`waypoint remove` and `route clear` no longer desync a ground group's map
+  symbols.** The ME's `remove_waypoint` walks off both ends of the spans table
+  (removing the first waypoint, and emptying the route), and it does so after
+  it has already removed the waypoint's icon and label but before it removes
+  the waypoint itself — leaving an orphaned symbol on the map and every later
+  index misaligned. Both verbs now keep the spans table out of that code path
+  and rebuild it afterwards. `route clear` also used to report a full clear
+  even when waypoints survived; it now reports what it actually removed and
+  fails if any are left.
+
+**Changed**
+- `route get`, `route list` and `waypoint get` now always report a waypoint's
+  `type` and `action` as the two plain strings the CLI documents. Previously a
+  waypoint the editor had loaded came back with `type` as a nested object and
+  no `action` at all, while one written moments earlier by these verbs came
+  back as a string — the same route could report both shapes at once.
+- `route get` no longer includes `route.spans`. It's a render cache the editor
+  rebuilds from the waypoints, and on a road-following route it can run to
+  thousands of points, crowding out the fields you asked for.
+
 ### [0.27.2] — 2026-08-05
 
 **Fixed**

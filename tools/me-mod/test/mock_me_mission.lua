@@ -157,6 +157,9 @@ local function add_group(category, side, country_name, opts)
     local g = {
         name = opts.name or (category .. '-' .. next_group_id()),
         groupId = opts.groupId or next_group_id(),
+        -- Real ME groups always carry `.type` (set in create_group,
+        -- me_mission.lua:5033-5048). insert_waypoint branches on it.
+        type = category,
         x = opts.x or 0, y = opts.y or 0,
         units = opts.units or {
             -- Use the unit-ID counter (separate from group-ID per real ME).
@@ -173,6 +176,13 @@ local function add_group(category, side, country_name, opts)
         },
         mapObjects = nil,
     }
+    -- Vehicles get the extra road-network span table ED's create_group
+    -- builds for them (me_mission.lua:5044-5048). insert_waypoint and
+    -- move_waypoint table.insert into it unconditionally, so a vehicle
+    -- group without one crashes the ME-native route primitives.
+    if category == 'vehicle' and g.route and g.route.spans == nil then
+        g.route.spans = {}
+    end
     g.boss = country
     if not country.boss then country.boss = M.mission.coalition[side] end
     table.insert(country[category].group, g)
@@ -207,9 +217,16 @@ end
 
 -- insert_waypoint — mock stand-in for me_mission.insert_waypoint. Mirrors the
 -- data-side behavior of the real function (alt_type inherited from previous
--- WP, default locks per index, wpt.index assigned, route renumbered) without
--- the mapObjects manipulation the real ME does. Tests don't need symbol
--- creation; they assert against route.points directly.
+-- WP, default locks per index, wpt.index assigned, route renumbered, vehicle
+-- spans spliced) without the mapObjects manipulation the real ME does. Tests
+-- don't need symbol creation; they assert against route.points directly.
+--
+-- The vehicle-spans splice is modelled deliberately: ED does it *after* the
+-- points insert and indexes group.route.spans without a nil guard
+-- (me_mission.lua:6236-6250), so a vehicle group that never got a spans
+-- table raises "bad argument #1 to 'insert' (table expected, got nil)" with
+-- the waypoint already spliced into route.points. Skipping this in the mock
+-- hid that failure mode from the suite.
 function M.insert_waypoint(group, index, type, x, y, alt, speed, name, formation_template)
     local alt_type = 'BARO'
     if group.route.points[index - 1] then
@@ -234,6 +251,21 @@ function M.insert_waypoint(group, index, type, x, y, alt, speed, name, formation
         name = name or '',
     }
     table.insert(group.route.points, index, wpt)
+    if group.type == 'vehicle' then
+        local pp = group.route.points[index - 1]
+        if pp then
+            table.insert(group.route.spans, index - 1,
+                { { x = pp.x, y = pp.y }, { x = wpt.x, y = wpt.y } })
+            if index < #group.route.points then
+                local np = group.route.points[index + 1]
+                group.route.spans[index] =
+                    { { x = wpt.x, y = wpt.y }, { x = np.x, y = np.y } }
+            else
+                group.route.spans[index] =
+                    { { x = wpt.x, y = wpt.y }, { x = wpt.x, y = wpt.y } }
+            end
+        end
+    end
     for i = index + 1, #group.route.points do
         group.route.points[i].index = i
     end
@@ -243,7 +275,32 @@ end
 -- remove_waypoint — mock stand-in for me_mission.remove_waypoint. Removes
 -- from route.points and renumbers. Skips the symbol/task-back-reference
 -- cleanup the real ME does.
+--
+-- The vehicle-spans block mirrors me_mission.lua:6649-6669 including its
+-- unguarded arithmetic, and like ED runs it BEFORE the points removal.
+-- Two indexes are out of range there: removing Lua index 1 reads
+-- spans[0] (nil), and emptying the table reads points[0] (nil). Both
+-- raise, and because ED has already mutated mapObjects by that point the
+-- group is left desynced. Modelling it faithfully is what lets the suite
+-- see that a caller must keep spans away from this function.
 function M.remove_waypoint(group, index)
+    if group.route.spans then
+        local spans = group.route.spans
+        if index < #spans then
+            local spanBefore = spans[index - 1]
+            local pointBefore = spanBefore[#spanBefore]
+            local pointAfter = spans[index + 1][1]
+            pointBefore.x = pointAfter.x
+            pointBefore.y = pointAfter.y
+            table.remove(spans, index)
+            local p1 = group.route.points[#spans + 1]
+            spans[#spans] = { { y = p1.y, x = p1.x }, { y = p1.y, x = p1.x } }
+        else
+            table.remove(spans, index)
+            local p1 = group.route.points[#spans]
+            spans[#spans][2] = { y = p1.y, x = p1.x }
+        end
+    end
     table.remove(group.route.points, index)
     for i = 1, #group.route.points do
         group.route.points[i].index = i

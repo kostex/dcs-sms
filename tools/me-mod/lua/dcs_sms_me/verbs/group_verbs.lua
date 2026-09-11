@@ -1299,7 +1299,12 @@ function M.group_set_formation(args)
     local resolved_template = ''
     local resolved_action_name
     if action_key then
+        -- wpt.type IS the (type, action) pair — see route_verbs' apply_wp_mode.
+        -- Mirror the resolved action into the flat wpt.action so the two never
+        -- contradict each other while both exist (ED drops wpt.action on the
+        -- next mission load).
         wp.type = UC.actions[action_key]
+        wp.action = wp.type and wp.type.action or nil
         if action_key ~= 'customForm' then
             wp.formation_template = ''  -- clear stale Custom state
         else
@@ -1318,6 +1323,7 @@ function M.group_set_formation(args)
                              .. '" (not a built-in alias and not in DB.templates)' }
         end
         wp.type = UC.actions.customForm
+        wp.action = wp.type and wp.type.action or nil
         wp.formation_template = args.formation
         resolved_template = args.formation
         resolved_action_name = 'customForm'

@@ -688,6 +688,114 @@ local function test_set_pos_vehicle_middle_wp_updates_both_spans()
     assert_eq(g.route.spans[2][2].x, 2000, 'set_pos vehicle middle: next-span end x preserved')
 end
 
+-- Discord bug report 2026-09-07: `me group create-vehicle` followed by
+-- `me waypoint add` failed with
+--   insert_waypoint failed: ...me_mission.lua:6240: bad argument #1 to
+--   'insert' (table expected, got nil)
+-- while still leaving the waypoint spliced into route.points. ED's
+-- create_group gives every vehicle group a route.spans table
+-- (me_mission.lua:5044-5048); our inject_group didn't, and insert_waypoint
+-- table.inserts into it without a nil guard.
+local function test_waypoint_add_on_created_vehicle_group()
+    mock.new_mission()
+    local created = verbs.group_create_vehicle({
+        country = 'Russia', type = 'T-72B', name = 'WP-Test-Ground',
+        north = -282000, east = 648500, heading_deg = 90 })
+    assert_true(created.ok, 'created vehicle: create ok')
+    local g = mock.group_by_name['WP-Test-Ground']
+    assert_true(g ~= nil, 'created vehicle: group registered')
+    assert_true(type(g.route.spans) == 'table',
+        'created vehicle: route.spans table present (ED create_group parity)')
+
+    local r = verbs.waypoint_add({ name = 'WP-Test-Ground', north = -281000,
+        east = 649500, speed = 8, type = 'Turning Point', action = 'Off Road' })
+    assert_true(r.ok, 'created vehicle: waypoint add ok — ' .. tostring(r.error))
+    assert_eq(#g.route.points, 2, 'created vehicle: route has 2 points')
+    local wp = g.route.points[2]
+    assert_eq(wp.x, -281000, 'created vehicle: WP1 north')
+    assert_eq(wp.y, 649500, 'created vehicle: WP1 east')
+    assert_eq(wp.speed, 8, 'created vehicle: WP1 speed')
+    -- Post-processing beyond insert_waypoint only runs when the pcall
+    -- survives; these catch a half-applied waypoint.
+    assert_eq(wp.action, 'Off Road', 'created vehicle: WP1 action applied')
+    assert_deep_eq(wp.task, { id = 'ComboTask', params = { tasks = {} } },
+        'created vehicle: WP1 got an empty ComboTask')
+    -- A second add exercises the span splice with an existing span present.
+    local r2 = verbs.waypoint_add({ name = 'WP-Test-Ground', north = -280000,
+        east = 650500, speed = 8 })
+    assert_true(r2.ok, 'created vehicle: second waypoint add ok — ' .. tostring(r2.error))
+    assert_eq(#g.route.points, 3, 'created vehicle: route has 3 points')
+    assert_eq(#g.route.spans, 3, 'created vehicle: one span per point')
+end
+
+-- Giving injected vehicle groups a route.spans table makes them take a code
+-- path they used to dodge: ED's remove_waypoint indexes spans[index-1] and
+-- points[#spans] with no range check (me_mission.lua:6649-6669), so removing
+-- wire-index 0 reads spans[0] and emptying the route reads points[0]. Both
+-- raise AFTER mapObjects has been spliced but BEFORE route.points has, which
+-- desyncs the group. remove_waypoint_native detaches spans around the call.
+local function test_waypoint_remove_first_wp_on_vehicle_with_spans()
+    mock.new_mission()
+    verbs.group_create_vehicle({ country = 'Russia', type = 'T-72B',
+        name = 'veh-rm', north = 0, east = 0 })
+    local g = mock.group_by_name['veh-rm']
+    verbs.waypoint_add({ name = 'veh-rm', north = 1000, east = 0 })
+    verbs.waypoint_add({ name = 'veh-rm', north = 2000, east = 0 })
+    assert_eq(#g.route.points, 3, 'remove first: three points to start')
+
+    local r = verbs.waypoint_remove({ name = 'veh-rm', index = 0 })
+    assert_true(r.ok, 'remove first: ok — ' .. tostring(r.error))
+    assert_eq(#g.route.points, 2, 'remove first: route shrunk')
+    assert_eq(g.route.points[1].x, 1000, 'remove first: WP1 shifted down to index 0')
+    assert_eq(#g.route.spans, #g.route.points,
+        'remove first: spans rebuilt to one entry per point')
+end
+
+-- Removing the final waypoint empties the spans table, which is the other
+-- out-of-range end of ED's arithmetic.
+local function test_route_clear_vehicle_with_spans()
+    mock.new_mission()
+    verbs.group_create_vehicle({ country = 'Russia', type = 'T-72B',
+        name = 'veh-clr', north = 0, east = 0 })
+    local g = mock.group_by_name['veh-clr']
+    verbs.waypoint_add({ name = 'veh-clr', north = 1000, east = 0 })
+    verbs.waypoint_add({ name = 'veh-clr', north = 2000, east = 0 })
+
+    local r = verbs.route_clear({ name = 'veh-clr' })
+    assert_true(r.ok, 'clear vehicle: ok — ' .. tostring(r.error))
+    assert_eq(#g.route.points, 0, 'clear vehicle: route emptied')
+    assert_eq(r.points_removed, 3, 'clear vehicle: reports all three removed')
+    assert_eq(r.remaining, 0, 'clear vehicle: reports nothing remaining')
+end
+
+-- route_clear used to return points_removed = previous unconditionally while
+-- swallowing every per-waypoint failure, so a partial clear reported success.
+local function test_route_clear_reports_partial_failure()
+    mock.new_mission()
+    local g = mock.add_vehicle({ name = 'veh-stuck' })
+    table.insert(g.route.points, mock.make_waypoint('vehicle', { x = 1000, y = 0 }))
+    local real_remove = mock.remove_waypoint
+    mock.remove_waypoint = function() error('simulated ME failure', 0) end
+    local r = verbs.route_clear({ name = 'veh-stuck' })
+    mock.remove_waypoint = real_remove
+    assert_false(r.ok, 'clear partial: reports failure')
+    assert_eq(r.remaining, 2, 'clear partial: reports what survived')
+    assert_eq(r.points_removed, 0, 'clear partial: reports nothing removed')
+    assert_contains(r.error, 'route clear incomplete', 'clear partial: error names the problem')
+end
+
+-- Same gap on the insert path.
+local function test_waypoint_insert_on_created_vehicle_group()
+    mock.new_mission()
+    verbs.group_create_vehicle({ country = 'Russia', type = 'T-72B',
+        name = 'WP-Ins-Ground', north = 0, east = 0 })
+    local g = mock.group_by_name['WP-Ins-Ground']
+    local r = verbs.waypoint_insert({ name = 'WP-Ins-Ground', before = 1,
+        north = 1000, east = 1000 })
+    assert_true(r.ok, 'created vehicle: waypoint insert ok — ' .. tostring(r.error))
+    assert_eq(#g.route.points, 2, 'created vehicle: insert appended point')
+end
+
 local function test_task_preservation_on_setters()
     local g = _setup_plane_route('tp2')
     g.route.points[1].task.params.tasks = { { id = 'Orbit', params = { alt = 500 } } }
@@ -744,6 +852,11 @@ test_set_mode_preserves_existing_timerefuar()
 test_set_type_clears_timerefuar_on_transition_away()
 test_set_pos_vehicle_first_wp_updates_span()
 test_set_pos_vehicle_middle_wp_updates_both_spans()
+test_waypoint_add_on_created_vehicle_group()
+test_waypoint_insert_on_created_vehicle_group()
+test_waypoint_remove_first_wp_on_vehicle_with_spans()
+test_route_clear_vehicle_with_spans()
+test_route_clear_reports_partial_failure()
 test_task_preservation_on_setters()
 
 print(string.format('test_verbs_route: %d passed, %d failed', passed, failed))
