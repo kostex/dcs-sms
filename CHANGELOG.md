@@ -116,6 +116,25 @@ This is the first tag after a long quiet period — `sms.version` had been froze
 
 ## ME-mod
 
+### [0.27.4] — 2026-09-13
+
+**Fixed**
+- **Community tab no longer dead-ends on `ssl.wrap: error loading CA locations
+  ((null))`.** The HTTPS transport verifies GitHub's certificate against the CA
+  bundle `install-me-mod` deploys to `Saved Games/DCS/dcs-sms/lib/`, and it
+  handed that path to LuaSec without ever checking the file was there. When it
+  wasn't — Saved Games never resolved at install time, a hand-placed LuaSec
+  build that came without a CA bundle, antivirus — OpenSSL raised the failure as
+  a *system* error, and `ERR_reason_error_string()` returns NULL for those, so
+  LuaSec's message degraded to a literal `(null)`: the refresh failed with
+  nothing the user could act on. The transport now probes the bundle itself, and
+  a second copy ships next to the mod in
+  `<DCS>/MissionEditor/modules/dcs_sms_me/` — installed and refreshed with the
+  mod itself instead of living in Saved Games — which it falls back to. If
+  neither copy can be opened, the status bar now says
+  `CA bundle missing (dcs-sms\lib\cacert.pem) — re-run "dcs-sms install-me-mod"`
+  and every path tried is written to `dcs.log`.
+
 ### [0.27.3] — 2026-09-13
 
 **Fixed**
