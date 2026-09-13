@@ -116,7 +116,7 @@ This is the first tag after a long quiet period — `sms.version` had been froze
 
 ## ME-mod
 
-### [Unreleased]
+### [0.27.3] — 2026-09-13
 
 **Fixed**
 - **`waypoint add` / `insert` no longer fail on ground groups the CLI created.**
