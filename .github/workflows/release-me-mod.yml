@@ -170,14 +170,39 @@ jobs:
           tag="${{ steps.tag.outputs.ref }}"
           title="ME-mod v${{ steps.ver.outputs.version }}"
           zip="dcs-sms-me-mod-v${{ steps.ver.outputs.version }}.zip"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag exists; updating notes + assets."
-            gh release edit   "$tag" --title "$title" --notes-file release-notes.md
-            gh release upload "$tag" dcs-sms.exe "$zip" --clobber
-          else
-            echo "Creating new release for $tag."
-            gh release create "$tag" --title "$title" --notes-file release-notes.md dcs-sms.exe "$zip"
-          fi
+
+          # Publish idempotently, because the API is not reliably transactional:
+          # shipping v0.27.3 hit HTTP 500 twice even though both writes had
+          # already applied server-side, leaving a complete, published release
+          # behind a red job. So every attempt re-asks whether the release
+          # exists rather than assuming the previous attempt did nothing — a
+          # blind `gh release create` retry would just fail with "already
+          # exists". --draft=false also republishes a release stranded as a
+          # draft by a create that died between upload and publish.
+          publish() {
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release $tag exists; updating notes + assets."
+              gh release edit   "$tag" --title "$title" --notes-file release-notes.md --draft=false &&
+              gh release upload "$tag" dcs-sms.exe "$zip" --clobber
+            else
+              echo "Creating new release for $tag."
+              gh release create "$tag" --title "$title" --notes-file release-notes.md dcs-sms.exe "$zip"
+            fi
+          }
+
+          delay=10
+          for attempt in 1 2 3 4 5; do
+            if publish; then
+              echo "Published on attempt ${attempt}."
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then break; fi
+            echo "Attempt ${attempt} failed; retrying in ${delay}s…"
+            sleep "$delay"
+            delay=$(( delay * 2 ))
+          done
+          echo "::error::Could not publish $tag after 5 attempts."
+          exit 1
 
   notify-discord:
     needs: release
@@ -225,8 +250,21 @@ jobs:
           ref: ${{ needs.release.outputs.tag }}
           fetch-depth: 0
 
-      - name: Post release embed to Discord
+      # Announce each tag at most once. Re-running this workflow — or just
+      # its failed jobs — re-runs this job too, so without a marker a retry
+      # would post the same embed again. Restore-only here; the matching
+      # save runs after the webhook call succeeds, so a failed post leaves
+      # no marker and the next attempt still announces.
+      - name: Has this tag already been announced?
+        id: announced
         if: steps.check.outputs.publish == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .discord-announced
+          key: discord-announced-${{ needs.release.outputs.tag }}
+
+      - name: Post release embed to Discord
+        if: steps.check.outputs.publish == 'true' && steps.announced.outputs.cache-hit != 'true'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           TAG: ${{ needs.release.outputs.tag }}
@@ -248,3 +286,12 @@ jobs:
               }]
             }')
           curl -fsSL -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK"
+          # Only reached when curl exited 0 (the step runs under `bash -e`).
+          date -u +%Y-%m-%dT%H:%M:%SZ > .discord-announced
+
+      - name: Record that this tag was announced
+        if: steps.check.outputs.publish == 'true' && steps.announced.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .discord-announced
+          key: discord-announced-${{ needs.release.outputs.tag }}
