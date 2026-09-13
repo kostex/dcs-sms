@@ -16,9 +16,10 @@
 -- OpenSSL DLLs + cacert.pem) is deployed by `install-me-mod` to dcs-sms\lib\
 -- (+ DCS bin) and wired onto package.cpath/path by init.lua. When absent,
 -- M.available() is false and the UI degrades to "secure networking
--- unavailable".
+-- unavailable". The CA bundle itself is located by community_ca.lua, which
+-- falls back to the copy installed next to the mod when lib\ has none.
 
-local paths = require('dcs_sms_me.paths')
+local ca = require('dcs_sms_me.community_ca')
 local M = {}
 
 -- Lazy, cached require of LuaSec. false (not nil) once known-missing so the
@@ -118,14 +119,33 @@ function M.request(_, url)
             return 'error', 'connect: ' .. tostring(e)
 
         elseif stage == 'wrap' then
+            -- Probe the CA bundle ourselves first. OpenSSL reports a cafile it
+            -- cannot open as a *system* error, and LuaSec renders those as
+            -- "error loading CA locations ((null))" — true but unactionable.
+            local cafile, tried = ca.resolve()
+            if not cafile then
+                pcall(function()
+                    log.write('sms.me.community', log.ERROR,
+                              'no readable CA bundle; tried: ' .. table.concat(tried, ' | '))
+                end)
+                return 'error', 'CA bundle missing (dcs-sms\\lib\\cacert.pem) — re-run "dcs-sms install-me-mod"'
+            end
             local c, e = mod.wrap(sock, {
                 mode     = 'client',
                 protocol = 'any',
-                cafile   = paths.LIB_DIR .. 'cacert.pem',
+                cafile   = cafile,
                 verify   = 'peer',
                 options  = 'all',
             })
-            if not c then return 'error', 'ssl.wrap: ' .. tostring(e) end
+            if not c then
+                local msg = tostring(e)
+                -- resolve() just opened that file, so a "(null)" here means
+                -- OpenSSL specifically couldn't read it (lock, permissions, AV).
+                if msg:find('(null)', 1, true) then
+                    msg = msg .. ' — OpenSSL could not read ' .. cafile
+                end
+                return 'error', 'ssl.wrap: ' .. msg
+            end
             conn = c
             pcall(function() conn:sni(host) end)  -- SNI: GitHub needs it
             conn:settimeout(0)

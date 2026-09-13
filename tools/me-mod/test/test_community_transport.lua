@@ -79,6 +79,21 @@ package.preload['ssl']    = function()
     return { wrap = function(sock, params) captured.wrap_params = params; return new_conn() end }
 end
 
+-- Stub the CA-bundle probe: the real one hits the filesystem and the bare test
+-- VM has no installed payload (community_ca has its own unit test). Setting
+-- ca_stub.path = nil simulates "no readable CA bundle anywhere" — the state
+-- that used to reach OpenSSL and come back as the unactionable
+-- "ssl.wrap: error loading CA locations ((null))".
+local ca_stub = { path = 'C:\\SG\\DCS\\dcs-sms\\lib\\cacert.pem' }
+package.preload['dcs_sms_me.community_ca'] = function()
+    return {
+        resolve = function()
+            if ca_stub.path then return ca_stub.path end
+            return nil, { 'C:\\SG\\DCS\\dcs-sms\\lib\\cacert.pem', 'D:\\DCS\\MissionEditor\\modules\\dcs_sms_me\\cacert.pem' }
+        end,
+    }
+end
+
 local paths     = require('dcs_sms_me.paths')
 local transport = require('dcs_sms_me.community_transport')
 
@@ -161,6 +176,23 @@ check('connect "Invalid argument" treated as pending, not fatal',
 check('EINVAL connect was re-polled, not aborted (connect called 3x)',
       captured.sock_connects == 3, captured.sock_connects)
 sock_connect_script = nil
+
+-- ---- No readable CA bundle: say what's wrong, don't let OpenSSL mumble ------
+-- Regression guard for the Community tab's "Refresh failed: ssl.wrap: error
+-- loading CA locations ((null))": OpenSSL raises an unopenable cafile as a
+-- system error, whose reason string LuaSec prints as "(null)". We must catch it
+-- before ssl.wrap and name both the file and the fix.
+ca_stub.path = nil
+captured = {}
+local reqnoca = transport.request(nil, 'https://raw.githubusercontent.com/owner/repo/main/index.json')
+local _, bodynoca, errnoca = drive(reqnoca)
+check('missing CA bundle yields no body', bodynoca == nil, bodynoca)
+check('missing CA bundle error names the file and the fix',
+      type(errnoca) == 'string' and errnoca:find('cacert.pem', 1, true) ~= nil
+      and errnoca:find('install-me-mod', 1, true) ~= nil, errnoca)
+check('missing CA bundle never reaches ssl.wrap (so never yields "(null)")',
+      captured.wrap_params == nil and tostring(errnoca):find('null', 1, true) == nil, errnoca)
+ca_stub.path = 'C:\\SG\\DCS\\dcs-sms\\lib\\cacert.pem'
 
 -- ---- Guard: a non-https URL fails immediately, without touching a socket ----
 local reqbad = transport.request(nil, 'http://insecure.example/x')

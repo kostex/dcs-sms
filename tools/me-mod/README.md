@@ -290,11 +290,16 @@ players and pulls them into your own library with one click. Imported prefabs
 land in a `Community/` folder and behave like any prefab you made.
 
 Browsing fetches over HTTPS, which DCS can't do on its own, so the mod uses a
-bundled **LuaSec** package. Drop the LuaSec payload (`ssl.dll`, the OpenSSL
-DLLs, `ssl.lua`, `https.lua`, and `cacert.pem`) into
-`Saved Games/DCS/dcs-sms/lib/`. Without it, the Community tab still opens and
-shows the last catalog it cached, but Refresh will report that secure
-networking is unavailable.
+bundled **LuaSec** package (`ssl.dll`, the OpenSSL DLLs, `ssl.lua`,
+`https.lua`, and the `cacert.pem` certificate bundle). `dcs-sms install-me-mod`
+deploys it for you, into `Saved Games/DCS/dcs-sms/lib/` and the DCS `bin`
+folders. Without it, the Community tab still opens and shows the last catalog
+it cached, but Refresh will report that secure networking is unavailable.
+
+If Refresh instead reports a **missing CA bundle**, that payload is incomplete —
+re-run `dcs-sms install-me-mod` (the installer prints a warning if it can't find
+your Saved Games folder; `--saved-games` or `DCS_SMS_SAVED_GAMES` points it at
+the right one).
 
 Everything in the catalog is vetted: community files are validated as pure data
 and never run as code, and each download is checked against a SHA-256 hash

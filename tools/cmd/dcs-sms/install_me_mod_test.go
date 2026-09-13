@@ -190,3 +190,40 @@ func TestInstallMeMod_ReturnsExitCode5WhenDirNotWritable(t *testing.T) {
 		t.Errorf("stderr should mention admin / elevation, got: %s", stderr.String())
 	}
 }
+
+// The Community tab verifies raw.githubusercontent.com against a CA bundle.
+// Its primary copy is the LuaSec payload under Saved Games, which can be
+// missing (Saved Games never resolved, a hand-rolled LuaSec drop, antivirus) —
+// and OpenSSL reports an unopenable CA file as a system error, which LuaSec
+// renders as the unactionable "error loading CA locations ((null))". So the
+// installer also drops the bundle next to the mod itself, in the DCS install
+// dir it is already writing, where community_ca.lua falls back to it.
+func TestInstallMeMod_ShipsCABundleWithTheModule(t *testing.T) {
+	install := newFakeInstall(t)
+	var stdout, stderr bytes.Buffer
+	if code := installMeModCmd([]string{"--dcs-path", install, "--no-config-save"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr.String())
+	}
+	caPath := filepath.Join(install, "MissionEditor", "modules", "dcs_sms_me", "cacert.pem")
+	data, err := os.ReadFile(caPath)
+	if err != nil {
+		t.Fatalf("CA bundle not installed next to the module: %v", err)
+	}
+	if !bytes.Contains(data, []byte("BEGIN CERTIFICATE")) {
+		t.Fatalf("installed CA bundle is not a PEM bundle (%d bytes)", len(data))
+	}
+
+	// It is not part of the Lua embed, so the stale-file prune must be told to
+	// keep it — otherwise every reinstall deletes and re-reports it.
+	stdout.Reset()
+	stderr.Reset()
+	if code := installMeModCmd([]string{"--dcs-path", install, "--no-config-save"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("reinstall exit %d, stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(caPath); err != nil {
+		t.Fatalf("CA bundle pruned by the reinstall: %v", err)
+	}
+	if strings.Contains(stdout.String(), "removed stale cacert.pem") {
+		t.Errorf("CA bundle reported as stale on reinstall: %s", stdout.String())
+	}
+}

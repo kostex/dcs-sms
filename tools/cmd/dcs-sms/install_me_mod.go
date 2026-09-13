@@ -40,6 +40,11 @@ func init() {
 
 const meModBackupSuffix = ".dcs-sms.bak"
 
+// caBundleName is the CA bundle filename, installed BOTH into the LuaSec lib
+// payload under Saved Games and next to the mod itself. See step 1a below and
+// dcs_sms_me/community_ca.lua, which probes both.
+const caBundleName = "cacert.pem"
+
 func installMeModCmd(args []string, stdout, stderr io.Writer) int {
 	fs, opts := installMeModFlags()
 	fs.SetOutput(stderr)
@@ -89,11 +94,25 @@ func installMeModCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "copied %s/* → %s\n", memod.ModuleDirName, moduleDst)
 
+	// Step 1a: drop the CA bundle next to the mod itself. The Community tab
+	// verifies raw.githubusercontent.com against it; its primary home is the
+	// LuaSec payload in Saved Games (step 1b), but that copy goes missing often
+	// enough — Saved Games never resolved, a hand-rolled LuaSec drop, antivirus —
+	// and OpenSSL reports an unopenable CA file as a *system* error, which LuaSec
+	// renders as the unactionable "error loading CA locations ((null))". This
+	// copy lives in the install dir we are already writing, so it is present
+	// whenever the mod is; community_ca.lua falls back to it.
+	if data, rerr := luasec.FS.ReadFile("payload/lib/" + caBundleName); rerr == nil {
+		if werr := os.WriteFile(filepath.Join(moduleDst, caBundleName), data, 0o644); werr != nil {
+			fmt.Fprintln(stderr, "dcs-sms install-me-mod: warning: CA bundle:", werr)
+		}
+	}
+
 	// Prune files left by an earlier version that were renamed or removed in this
 	// one (the module dir is owned entirely by the installer, so anything not in
 	// the embed is stale). Without this, a rename like dtc_skins.lua ->
 	// sms_skins.lua would leave the old file lingering and loadable.
-	removed, err := pruneStaleEmbedDir(memod.FS, memod.ModuleDirName, moduleDst)
+	removed, err := pruneStaleEmbedDir(memod.FS, memod.ModuleDirName, moduleDst, caBundleName)
 	if err != nil {
 		fmt.Fprintln(stderr, "dcs-sms install-me-mod: prune stale modules:", err)
 		return 3
@@ -257,9 +276,14 @@ func copyPayloadDir(efs fs.FS, srcSubdir, dstDir string) (int, error) {
 // of the embed subtree srcSubdir, so files renamed or deleted between versions
 // don't linger in the install. The module directory is owned entirely by the
 // installer (pure source, no user/runtime files), so deleting orphans is safe.
+// keep names slash-separated relative paths the installer writes itself that
+// are NOT in the embed (the CA bundle), so they aren't treated as orphans.
 // Returns the slash-separated relative paths removed.
-func pruneStaleEmbedDir(efs fs.FS, srcSubdir, dstDir string) ([]string, error) {
+func pruneStaleEmbedDir(efs fs.FS, srcSubdir, dstDir string, keep ...string) ([]string, error) {
 	expected := map[string]bool{}
+	for _, rel := range keep {
+		expected[filepath.FromSlash(rel)] = true
+	}
 	if err := fs.WalkDir(efs, srcSubdir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
