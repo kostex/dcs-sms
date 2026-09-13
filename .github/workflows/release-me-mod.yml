@@ -181,14 +181,52 @@ jobs:
 
   notify-discord:
     needs: release
+    # Announce even when `release` reports failure. GitHub's release API has
+    # returned HTTP 500 *after* applying the write — seen twice while shipping
+    # v0.27.3, where the release ended up live, published and complete with
+    # both assets while the job went red. A plain `needs:` skips this job on
+    # any non-success, so that wobble silently cost the announcement.
+    # Cancellation is the one outcome we still honour: that means someone
+    # stopped the release deliberately.
+    #
+    # A red `release` job is NOT proof the release published, though, so the
+    # first step verifies before posting — a genuine build failure leaves no
+    # release, and we stay quiet rather than announcing a dead link.
+    if: always() && needs.release.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
+      - name: Check the release actually published
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout yet, so there's no git remote for gh to infer from.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "The release job produced no tag — nothing to announce."
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view "$TAG" --json isDraft,assets \
+               --jq 'select(.isDraft == false) | .assets[].name' 2>/dev/null \
+               | grep -qx 'dcs-sms.exe'; then
+            echo "Release $TAG is published and carries dcs-sms.exe; announcing."
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $TAG is missing, still a draft, or has no dcs-sms.exe"
+            echo "asset — skipping the announcement."
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.check.outputs.publish == 'true'
         with:
           ref: ${{ needs.release.outputs.tag }}
           fetch-depth: 0
 
       - name: Post release embed to Discord
+        if: steps.check.outputs.publish == 'true'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           TAG: ${{ needs.release.outputs.tag }}
