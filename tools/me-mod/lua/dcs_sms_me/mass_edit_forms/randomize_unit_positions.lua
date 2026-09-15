@@ -98,7 +98,7 @@ function M._apply(entities, radius, unit)
         local old_east  = tonumber(u.y)
         if old_north == nil or old_east == nil then
             failed = failed + 1
-            log_warn('unit_set_pos threw: unit %d x/y position is nil, skipping', i)
+            log_warn('unit_set_pos threw: unit x/y position is nil, skipping unit: '.. tostring(i))
         else
             -- Uniform distribution over a disk.
             local angle = math.random() * 2 * math.pi
