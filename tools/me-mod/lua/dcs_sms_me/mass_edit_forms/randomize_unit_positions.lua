@@ -98,34 +98,34 @@ function M._apply(entities, radius, unit)
         local old_east  = tonumber(u.y)
         if old_north == nil or old_east == nil then
             failed = failed + 1
-	    log_warn('unit_set_pos threw: a unit's x/y position is nil, skipping')
+            log_warn('unit_set_pos threw: unit %d x/y position is nil, skipping', i)
         else
-	    -- Uniform distribution over a disk.
-	    local angle = math.random() * 2 * math.pi
-	    local distance = math.sqrt(math.random()) * radius_m
-	    local north = anchor_north + math.cos(angle) * distance
-	    local east  = anchor_east  + math.sin(angle) * distance
+            -- Uniform distribution over a disk.
+            local angle = math.random() * 2 * math.pi
+            local distance = math.sqrt(math.random()) * radius_m
+            local north = anchor_north + math.cos(angle) * distance
+            local east  = anchor_east  + math.sin(angle) * distance
 
-	    local p_ok, res = pcall(verbs.unit_set_pos, {
-	        id = u.unitId,
-	        north = north,
-	        east = east,
-	    })
+            local p_ok, res = pcall(verbs.unit_set_pos, {
+                id = u.unitId,
+                north = north,
+                east = east,
+            })
 
-	    if not p_ok then
-	        failed = failed + 1
-	        log_warn('unit_set_pos threw: ' .. tostring(res))
-	    elseif type(res) ~= 'table' or not res.ok then
-	        failed = failed + 1
-	        log_warn('unit_set_pos failed: ' ..
-	                 tostring(res and res.error or '?'))
-	    else
-	        changed_rows[#changed_rows + 1] = {
-	            unit = u,
-	            old_north = old_north,
-	            old_east = old_east,
-	        }
-	    end
+            if not p_ok then
+                failed = failed + 1
+                log_warn('unit_set_pos threw: ' .. tostring(res))
+            elseif type(res) ~= 'table' or not res.ok then
+                failed = failed + 1
+                log_warn('unit_set_pos failed: ' ..
+                         tostring(res and res.error or '?'))
+            else
+                changed_rows[#changed_rows + 1] = {
+                    unit = u,
+                    old_north = old_north,
+                    old_east = old_east,
+                }
+            end
         end
     end
 
